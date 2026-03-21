@@ -5,44 +5,69 @@ local M = {}
 ---@field release string Command for release builds
 
 ---@class project-run.Preset
----@field ft string Filetype to activate on
+---@field paths? string[] Paths to activate this preset on
 ---@field build project-run.Cmds | string
 ---@field run project-run.Cmds | string
 ---@field efm? string Custom errorformat to apply to qf
 ---@field project_name? string Project name - used for replacements
 
 ---@class project-run.Settings
----@field show_output "build" | "run" | "all" | "on_error" When to show output
 ---@field notify_build_time boolean Whether to send a notification containing the build time
 
 ---@class project-run.Config
----@field presets table<string, project-run.Preset>
+---@field presets { filetypes: table<string, project-run.Preset>, projects: table<string, project-run.Preset> }
 ---@field settings project-run.Settings
 local config = {
 	presets = {
-		odin = {
-			ft = "odin",
-			build = { debug = "odin build .", release = "odin build ." },
-			run = "odin run .",
-			efm = "%f(%l:%c) %t%*[^:]: %m",
+		filetypes = {
+			odin = {
+				build = { debug = "odin build .", release = "odin build ." },
+				run = "odin run .",
+				efm = "%f(%l:%c) %t%*[^:]: %m",
+			},
+			cpp = {
+				build = "g++ %%file%% -o %%name%%",
+				run = "./%%name%%",
+				project_name = "mainnnn",
+			},
 		},
-		cpp = {
-			ft = "cpp",
-			build = "g++ %%file%% -o %%name%%",
-			run = "./%%name%%",
-			project_name = "mainnnn",
+		projects = {
+			test = {
+				--TODO: this should inherit from 'ft' = odin
+				ft = "odin",
+				paths = { "~/Documents/programming/odin/testmake" },
+				build = { debug = "odin build .", release = "odin build ." },
+				run = "odin run .",
+				efm = "%f(%l:%c) %t%*[^:]: %m",
+			},
 		},
 	},
 	settings = {
-		show_output = "build",
 		notify_build_time = true,
 	},
 }
 
+local function get_project_preset()
+	local cwd = vim.fn.getcwd()
+	for _, project in pairs(config.presets.projects) do
+		if project.paths then
+			for _, path in ipairs(project.paths) do
+				local expanded = vim.fn.expand(path)
+				--TODO: make work for subdir
+				if cwd == expanded then
+					vim.print(project)
+					return project
+				end
+			end
+		end
+	end
+	return nil
+end
+
 -- Get the cmd for the current file type and selected mode
 ---@param mode? "debug" | "release"
 ---@param action? "build" | "run"
-local get_ft_cmd = function(mode, action)
+local get_run_cmd = function(mode, action)
 	mode = mode or "debug"
 	action = action or "build"
 
@@ -53,7 +78,7 @@ local get_ft_cmd = function(mode, action)
 
 	local cmd
 
-	local preset = config.presets[ft]
+	local preset = get_project_preset() or config.presets.filetypes[ft]
 
 	if not preset then
 		return false
@@ -80,7 +105,6 @@ local get_ft_cmd = function(mode, action)
 
 	local function replace_in_word(word)
 		-- %%%% becomes a single literal %,
-		-- gsub replaces all occurrences within the word, not just whole-word matches
 		return (
 			word:gsub("%%%%([^%%%%]+)%%%%", function(capture)
 				local key = "%%" .. capture .. "%%"
@@ -95,7 +119,7 @@ end
 -- build the current ft
 ---@param mode? "release" | "debug"
 M.build = function(mode, callback)
-	local cmd = get_ft_cmd(mode, "build")
+	local cmd = get_run_cmd(mode, "build")
 
 	if not cmd then
 		return false
@@ -112,8 +136,9 @@ M.build = function(mode, callback)
 		success = false
 
 		local efm
-		if config.presets[vim.bo.ft] then
-			efm = config.presets[vim.bo.ft].efm
+		local preset = get_project_preset() or config.presets.filetypes[vim.bo.ft]
+		if preset then
+			efm = preset.efm
 		end
 
 		local items = vim.fn.getqflist({ lines = data, efm = efm }).items
@@ -141,8 +166,10 @@ M.build = function(mode, callback)
 			end
 
 			if success then
-				local message = string.format("Build completed in %.2fms", (vim.uv.hrtime() - start_time) / 1e6)
-				vim.notify(message, "info", { title = "Project-run" })
+				if config.settings.notify_build_time then
+					local message = string.format("Build completed in %.2fms", (vim.uv.hrtime() - start_time) / 1e6)
+					vim.notify(message, "info", { title = "Project-run" })
+				end
 			else
 				vim.notify("Build failed", "error", { title = "Project-run" })
 			end
@@ -163,7 +190,7 @@ M.run = function(build, mode)
 			return
 		end
 
-		local cmd = get_ft_cmd(mode, "run")
+		local cmd = get_run_cmd(mode, "run")
 		if not cmd then
 			return false
 		end
@@ -184,6 +211,9 @@ M.run = function(build, mode)
 	end
 end
 
-M.setup = function() end
+M.setup = function(user_config)
+	user_config = user_config or {}
+	config = vim.tbl_deep_extend("force", config, user_config)
+end
 
 return M
