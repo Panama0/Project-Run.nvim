@@ -1,15 +1,20 @@
 local M = {}
 
+--TODO: way to run a selected chunk of code
+
+--TODO: add testing as a cmd or string
+
 ---@class project-run.Cmds
 ---@field debug string Command for debug builds
 ---@field release string Command for release builds
 
 ---@class project-run.Preset
----@field paths? string[] Paths to activate this preset on
----@field build project-run.Cmds | string
----@field run project-run.Cmds | string
+---@field paths? string[] Paths to activate this preset on (projects only)
+---@field build? project-run.Cmds | string
+---@field run? project-run.Cmds | string
 ---@field efm? string Custom errorformat to apply to qf
 ---@field project_name? string Project name - used for replacements
+---@field base_ft? string Filetype to use as template (projects only)
 
 ---@class project-run.Settings
 ---@field notify_build_time boolean Whether to send a notification containing the build time
@@ -17,6 +22,10 @@ local M = {}
 ---@class project-run.Config
 ---@field presets { filetypes: table<string, project-run.Preset>, projects: table<string, project-run.Preset> }
 ---@field settings project-run.Settings
+
+---@class project-run.UserConfig
+---@field presets? { filetypes: table<string, project-run.Preset>, projects: table<string, project-run.Preset> }
+---@field settings? project-run.Settings
 local config = {
 	presets = {
 		filetypes = {
@@ -26,20 +35,20 @@ local config = {
 				efm = "%f(%l:%c) %t%*[^:]: %m",
 			},
 			cpp = {
-				build = "g++ %%file%% -o %%name%%",
-				run = "./%%name%%",
-				project_name = "mainnnn",
+				build = "g++ {%} -o main -Wall",
+				run = "./main",
+			},
+			c = {
+				base_ft = "cpp",
 			},
 		},
 		projects = {
-			test = {
-				--TODO: this should inherit from 'ft' = odin
-				ft = "odin",
-				paths = { "~/Documents/programming/odin/testmake" },
-				build = { debug = "odin build .", release = "odin build ." },
-				run = "odin run .",
-				efm = "%f(%l:%c) %t%*[^:]: %m",
-			},
+			-- test = {
+			-- 	base_ft = "odin",
+			-- 	paths = { "~/Documents/programming/odin/testmake" },
+			-- 	build = { debug = "shell: {$SHELL}", release = "odin build ." },
+			-- 	run = "odin run .",
+			-- },
 		},
 	},
 	settings = {
@@ -53,9 +62,9 @@ local function get_project_preset()
 		if project.paths then
 			for _, path in ipairs(project.paths) do
 				local expanded = vim.fn.expand(path)
-				--TODO: make work for subdir
-				if cwd == expanded then
-					vim.print(project)
+				if expanded == "" then
+					vim.notify("Invalid path in project preset: " .. path, "warn", { title = "Project-run" })
+				elseif vim.startswith(cwd, expanded) then
 					return project
 				end
 			end
@@ -94,26 +103,13 @@ local get_run_cmd = function(mode, action)
 		return false
 	end
 
-	-- replacements
-	--TODO: user config to extend this table
-	--TODO: this should also probably happen when the plugin is loaded to avoid repeating every run
-	local replacements = {
-		["%%file%%"] = vim.fn.expand("%:p"),
-		["%%name%%"] = preset.project_name,
-		["%%mode%%"] = mode,
-	}
-
-	local function replace_in_word(word)
-		-- %%%% becomes a single literal %,
-		return (
-			word:gsub("%%%%([^%%%%]+)%%%%", function(capture)
-				local key = "%%" .. capture .. "%%"
-				return replacements[key] or word
-			end)
-		)
+	local function expand_word(word)
+		local cap = word:sub(2, #word - 1)
+		return vim.fn.expand(cap)
 	end
 
-	return vim.tbl_map(replace_in_word, vim.split(cmd, "%s+", { trimempty = true }))
+	-- expand {} using vim.fn.expand()
+	return cmd:gsub("{.-}", expand_word)
 end
 
 -- build the current ft
@@ -125,15 +121,10 @@ M.build = function(mode, callback)
 		return false
 	end
 
-	local success = true
-
 	local handle_output = function(data)
 		if data == nil or (#data == 1 and data[1] == "") then
 			return
 		end
-
-		--TODO: maybe this has to mode to on_stderr, but we will test with it here for now
-		success = false
 
 		local efm
 		local preset = get_project_preset() or config.presets.filetypes[vim.bo.ft]
@@ -157,7 +148,7 @@ M.build = function(mode, callback)
 		on_stderr = function(_, data)
 			handle_output(data)
 		end,
-		on_exit = function()
+		on_exit = function(_, code, _)
 			local qf = vim.fn.getqflist()
 			if #qf > 0 then -- qf is populated
 				vim.cmd("botright copen")
@@ -165,31 +156,33 @@ M.build = function(mode, callback)
 				vim.cmd("cclose")
 			end
 
-			if success then
+			if code == 0 then
 				if config.settings.notify_build_time then
 					local message = string.format("Build completed in %.2fms", (vim.uv.hrtime() - start_time) / 1e6)
 					vim.notify(message, "info", { title = "Project-run" })
 				end
 			else
-				vim.notify("Build failed", "error", { title = "Project-run" })
+				vim.notify("Build failed with code " .. code, "error", { title = "Project-run" })
 			end
 
-			callback(success)
+			if callback then
+				callback(code)
+			end
 		end,
 	})
 end
 
 -- run current ft
 ---@param mode? "release" | "debug"
----@param build boolean Whether to build first
-M.run = function(build, mode)
+---@param build? boolean Whether to build first
+M.run = function(mode, build)
 	mode = mode or "debug"
 
-	local function build_if_success(success)
-		if not success then
-			return
-		end
+	if build == nil then
+		build = true
+	end
 
+	local function run()
 		local cmd = get_run_cmd(mode, "run")
 		if not cmd then
 			return false
@@ -206,14 +199,36 @@ M.run = function(build, mode)
 		require("terman").open(terman_preset)
 	end
 
+	-- setup callback
+	local function run_if_success(code)
+		if code == 0 then
+			run()
+		end
+	end
+
 	if build then
-		M.build(mode, build_if_success)
+		M.build(mode, run_if_success)
+	else
+		run()
 	end
 end
 
+---@param user_config? project-run.UserConfig
 M.setup = function(user_config)
 	user_config = user_config or {}
 	config = vim.tbl_deep_extend("force", config, user_config)
+
+	local function resolve_base_presets(presets)
+		for key, preset in pairs(presets) do
+			local base = config.presets.filetypes[preset.base_ft]
+			if preset.base_ft and base then
+				presets[key] = vim.tbl_deep_extend("force", base, preset)
+			end
+		end
+	end
+
+	resolve_base_presets(config.presets.filetypes)
+	resolve_base_presets(config.presets.projects)
 end
 
 return M
