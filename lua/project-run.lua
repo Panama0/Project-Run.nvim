@@ -1,8 +1,7 @@
 local M = {}
 
 --TODO: way to run a selected chunk of code
-
---TODO: add testing as a cmd or string
+--TODO: pre and post build hooks
 
 ---@class project-run.Cmds
 ---@field debug string Command for debug builds
@@ -11,10 +10,11 @@ local M = {}
 ---@class project-run.Preset
 ---@field paths? string[] Paths to activate this preset on (projects only)
 ---@field build? project-run.Cmds | string
----@field run? project-run.Cmds | string
+---@field run_target? project-run.Cmds | string
+---@field dap_handler? string DAP Handler to use
+---@field test? string Command to run for tests
 ---@field efm? string Custom errorformat to apply to qf
----@field project_name? string Project name - used for replacements
----@field base_ft? string Filetype to use as template (projects only)
+---@field base_ft? string Filetype to use as template
 
 ---@class project-run.Settings
 ---@field notify_build_time boolean Whether to send a notification containing the build time
@@ -30,66 +30,74 @@ local config = {
 	presets = {
 		filetypes = {
 			odin = {
-				build = { debug = "odin build .", release = "odin build ." },
-				run = "odin run .",
+				--TODO: dap integration. do we need a debug command that can also be a function/call dap
+				build = {
+					debug = "odin build . -o:none -out:out/debug/main -debug",
+					release = "odin build . -o:speed -out:out/release/main",
+				},
+				run_target = { debug = "out/debug/main", release = "out/debug/main" },
+				dap_handler = "codelldb",
+				test = "odin test test", -- tests need to be in cwd/test
 				efm = "%f(%l:%c) %t%*[^:]: %m",
 			},
 			cpp = {
 				build = "g++ {%} -o main -Wall",
-				run = "./main",
+				run_target = "./main",
 			},
 			c = {
 				base_ft = "cpp",
 			},
 		},
-		projects = {
-			-- test = {
-			-- 	base_ft = "odin",
-			-- 	paths = { "~/Documents/programming/odin/testmake" },
-			-- 	build = { debug = "shell: {$SHELL}", release = "odin build ." },
-			-- 	run = "odin run .",
-			-- },
-		},
+		projects = {},
 	},
 	settings = {
 		notify_build_time = true,
 	},
 }
 
-local function get_project_preset()
+local function get_current_preset()
+	local ft = vim.bo.ft
+	if not ft then
+		return nil
+	end
+
+	--TODO: this code only needs to run on startup and when the dir changes, we can cache this
 	local cwd = vim.fn.getcwd()
 	for _, project in pairs(config.presets.projects) do
 		if project.paths then
 			for _, path in ipairs(project.paths) do
 				local expanded = vim.fn.expand(path)
 				if expanded == "" then
-					vim.notify("Invalid path in project preset: " .. path, "warn", { title = "Project-run" })
+					vim.notify("Invalid path in project preset: " .. path, "error", { title = "Project-run" })
 				elseif vim.startswith(cwd, expanded) then
 					return project
 				end
 			end
 		end
 	end
-	return nil
+
+	return config.presets.filetypes[ft]
 end
 
 -- Get the cmd for the current file type and selected mode
 ---@param mode? "debug" | "release"
----@param action? "build" | "run"
-local get_run_cmd = function(mode, action)
+---@param action? "build" | "run" | "test"
+local function get_action_cmd(mode, action)
 	mode = mode or "debug"
 	action = action or "build"
 
 	local ft = vim.bo.ft
 	if not ft then
+		vim.notify("No filetype set for buffer", "error", { title = "Project-run" })
 		return false
 	end
 
 	local cmd
 
-	local preset = get_project_preset() or config.presets.filetypes[ft]
+	local preset = get_current_preset()
 
 	if not preset then
+		vim.notify("No " .. action .. " command configured", "error", { title = "Project-run" })
 		return false
 	end
 
@@ -114,10 +122,12 @@ end
 
 -- build the current ft
 ---@param mode? "release" | "debug"
-M.build = function(mode, callback)
-	local cmd = get_run_cmd(mode, "build")
+---@param callback function Function to call when done
+function M.build(mode, callback)
+	local cmd = get_action_cmd(mode, "build")
 
 	if not cmd then
+		vim.notify("No build command configured", "error", { title = "Project-run" })
 		return false
 	end
 
@@ -127,7 +137,7 @@ M.build = function(mode, callback)
 		end
 
 		local efm
-		local preset = get_project_preset() or config.presets.filetypes[vim.bo.ft]
+		local preset = get_current_preset()
 		if preset then
 			efm = preset.efm
 		end
@@ -172,23 +182,21 @@ M.build = function(mode, callback)
 	})
 end
 
--- run current ft
----@param mode? "release" | "debug"
----@param build? boolean Whether to build first
-M.run = function(mode, build)
+local function post_build_action(action, mode, build)
 	mode = mode or "debug"
 
 	if build == nil then
 		build = true
 	end
 
-	local function run()
-		local cmd = get_run_cmd(mode, "run")
+	local function terman_action()
+		local cmd = get_action_cmd(mode, action)
 		if not cmd then
+			vim.notify("No " .. action .. " command configured", "error", { title = "Project-run" })
 			return false
 		end
 
-		local job_name = "Project-run-" .. vim.bo.ft
+		local job_name = "Project-run-" .. action .. "-" .. vim.bo.ft
 
 		local terman_preset = {
 			name = job_name,
@@ -199,22 +207,94 @@ M.run = function(mode, build)
 		require("terman").open(terman_preset)
 	end
 
-	-- setup callback
 	local function run_if_success(code)
 		if code == 0 then
-			run()
+			terman_action()
 		end
 	end
+
+	--TODO: move this line into the get preset function
+	local preset = get_current_preset() or config.presets.filetypes[vim.bo.ft]
 
 	if build then
 		M.build(mode, run_if_success)
 	else
-		run()
+		terman_action()
 	end
 end
 
+-- run current ft
+---@param mode? "release" | "debug"
+---@param build? boolean Whether to build first
+---@param launch_debug? boolean Launch debug via dap
+function M.launch(mode, build, launch_debug)
+	post_build_action("run", mode, build)
+end
+
+---@param build? boolean Whether to build first
+function M.launch_debug(build)
+	if build == nil then
+		build = true
+	end
+
+	local function launch_dap(code)
+		if code == 0 then
+			local dap = require("dap")
+			local ft = vim.bo.ft
+
+			if not ft then
+				return
+			end
+
+			local preset = get_current_preset()
+			if not preset then
+				vim.notify("No preset found for buffer", "error", { title = "Project-run" })
+				return
+			end
+
+			if not preset.dap_handler then
+				vim.notify("No DAP handler configured for this preset", "error", { title = "Project-run" })
+				return
+			end
+
+			-- untested
+			local program
+			if type(preset.run_target) == "string" then
+				program = preset.run_target
+			elseif preset.run_target.debug then
+				program = preset.run_target.debug
+			else
+				vim.notify("No run target found", "error", { title = "Project-run" })
+				return
+			end
+
+			local dap_config = {
+				console = "integratedTerminal",
+				name = "Project-Run Debug",
+				program = program, --FIX:
+				request = "launch",
+				type = preset.dap_handler,
+			}
+
+			vim.print(dap_config)
+			dap.run(dap_config)
+		end
+	end
+
+	if build then
+		M.build("debug", launch_dap)
+	else
+		launch_dap(0)
+	end
+end
+
+---@param build boolean Build first?
+function M.test(build)
+	post_build_action("test", "debug", build)
+end
+
 ---@param user_config? project-run.UserConfig
-M.setup = function(user_config)
+function M.setup(user_config)
 	user_config = user_config or {}
 	config = vim.tbl_deep_extend("force", config, user_config)
 
