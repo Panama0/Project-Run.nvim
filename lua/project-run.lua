@@ -1,10 +1,5 @@
 local M = {}
 
---TODO: way to run a selected chunk of code
---TODO: pre and post build hooks
---TODO: get_action_cmd sucks
---TODO: get_current_preset sucks
-
 --TODO: presets for:
 -- Rust
 -- Go
@@ -44,9 +39,9 @@ local config = {
 					debug = "odin build . -o:none -out:out/debug/main -debug",
 					release = "odin build . -o:speed -out:out/release/main",
 				},
-				run_target = { debug = "out/debug/main", release = "out/debug/main" },
-				dap_handler = "codelldb",
+				run_target = { debug = "out/debug/main", release = "out/release/main" },
 				test = "odin test test", -- tests need to be in cwd/test
+				dap_handler = "codelldb",
 				efm = "%f(%l:%c) %t%*[^:]: %m",
 			},
 			cpp = {
@@ -62,20 +57,26 @@ local config = {
 				dap_handler = "python",
 			},
 		},
-		projects = {},
+		projects = {
+			test = {
+				paths = { "~/Documents/programming/odin/testmake/testproject" },
+				base_ft = "odin",
+			},
+		},
 	},
 	settings = {
 		notify_build_time = true,
 	},
 }
 
-local function get_current_preset()
-	local ft = vim.bo.ft
-	if not ft then
-		return nil
-	end
+local state = {
+	current_project = nil,
+}
 
-	--TODO: this code only needs to run on startup and when the dir changes, we can cache this
+-- check if we are in a project dir and update state
+local function check_project()
+	state.current_project = nil
+
 	local cwd = vim.fn.getcwd()
 	for _, project in pairs(config.presets.projects) do
 		if project.paths then
@@ -84,13 +85,15 @@ local function get_current_preset()
 				if expanded == "" then
 					vim.notify("Invalid path in project preset: " .. path, "error", { title = "Project-run" })
 				elseif vim.startswith(cwd, expanded) then
-					return project
+					state.current_project = project
 				end
 			end
 		end
 	end
+end
 
-	return config.presets.filetypes[ft]
+local function get_current_preset()
+	return state.current_project or config.presets.filetypes[vim.bo.ft]
 end
 
 -- expand {} using vim.fn.expand()
@@ -103,32 +106,22 @@ local function expand(str)
 	return str:gsub("{.-}", expand_word)
 end
 
--- Get the cmd for the current file type and selected mode
+-- Navigate the cmd | string structure in config
 ---@param mode "debug" | "release"
----@param action "build" | "launch" | "test"
-local function get_action_cmd(mode, action)
-	-- mode = mode or "debug"
-	-- action = action or "build"
+---@param key string Key to locate
+local function get_mode_command(mode, key)
+	local preset = get_current_preset()
 
-	local ft = vim.bo.ft
-	if not ft then
-		vim.notify("No filetype set for buffer", "error", { title = "Project-run" })
+	if not preset then
 		return false
 	end
 
 	local cmd
 
-	local preset = get_current_preset()
-
-	if not preset then
-		vim.notify("No " .. action .. " command configured", "error", { title = "Project-run" })
-		return false
-	end
-
-	if type(preset[action]) == "string" then
-		cmd = preset[action]
-	elseif preset[action] then
-		cmd = preset[action][mode]
+	if type(preset[key]) == "string" then
+		cmd = preset[key]
+	elseif preset[key] then
+		cmd = preset[key][mode]
 	end
 
 	if not cmd then
@@ -139,10 +132,14 @@ local function get_action_cmd(mode, action)
 end
 
 -- build the current ft
----@param mode "release" | "debug"
----@param callback function Function to call when done
+---@param mode? "release" | "debug"
+---@param callback? function Function to call when done
 function M.build(mode, callback)
-	local cmd = get_action_cmd(mode, "build")
+	if mode == nil then
+		mode = "debug"
+	end
+
+	local cmd = get_mode_command(mode, "build")
 
 	if not cmd then
 		vim.notify("No build command configured", "error", { title = "Project-run" })
@@ -200,7 +197,7 @@ function M.build(mode, callback)
 	})
 end
 
----@param action "launch" | "test" | "launch_debug"
+---@param action "launch" | "test" | "launch_DAP"
 ---@param mode "debug" | "release"
 ---@param build boolean
 local function post_build_action(action, mode, build)
@@ -208,13 +205,19 @@ local function post_build_action(action, mode, build)
 
 	local function run_action_terman()
 		-- diagnostic can be ignored as we check for this, but could be fixed later
-		local cmd = get_action_cmd(mode, action)
+		local cmd
+		if action == "test" then
+			cmd = get_current_preset().test
+		else
+			cmd = get_mode_command(mode, "run_target")
+		end
+
 		if not cmd then
 			vim.notify("No " .. action .. " command configured", "error", { title = "Project-run" })
 			return false
 		end
 
-		local job_name = "Project-run-" .. action .. "-" .. vim.bo.ft
+		local job_name = "Project-Run-" .. action
 
 		local terman_preset = {
 			name = job_name,
@@ -225,7 +228,7 @@ local function post_build_action(action, mode, build)
 		require("terman").open(terman_preset)
 	end
 
-	local function launch_debug()
+	local function launch_DAP()
 		local dap = require("dap")
 		local ft = vim.bo.ft
 
@@ -272,8 +275,8 @@ local function post_build_action(action, mode, build)
 			if action == "launch" or action == "test" then
 				run_action_terman()
 			else
-				-- action == "launch_debug"
-				launch_debug()
+				-- action == "launch_DAP"
+				launch_DAP()
 			end
 		end
 	end
@@ -289,29 +292,29 @@ end
 ---@param mode "release" | "debug"
 ---@param build? boolean Whether to build first when applicable
 function M.launch(mode, build)
-	if build == true then
-		post_build_action("launch", mode, true)
-	else
+	if build == false then
 		post_build_action("launch", mode, false)
+	else
+		post_build_action("launch", mode, true)
 	end
 end
 
 ---@param build? boolean Whether to build first when applicable
-function M.launch_debug(build)
+function M.launch_DAP(build)
 	-- dont build unless its configured with a build command
-	if build == true then
-		post_build_action("launch_debug", "debug", true)
+	if build == false then
+		post_build_action("launch_DAP", "debug", false)
 	else
-		post_build_action("launch_debug", "debug", false)
+		post_build_action("launch_DAP", "debug", true)
 	end
 end
 
 ---@param build? boolean Build first?
 function M.test(build)
-	if build == true then
-		post_build_action("test", "debug", true)
-	else
+	if build == false then
 		post_build_action("test", "debug", false)
+	else
+		post_build_action("test", "debug", true)
 	end
 end
 
@@ -331,6 +334,13 @@ function M.setup(user_config)
 
 	resolve_base_presets(config.presets.filetypes)
 	resolve_base_presets(config.presets.projects)
+
+	vim.api.nvim_create_autocmd({ "VimEnter", "DirChanged" }, {
+		desc = "Check for project",
+		group = vim.api.nvim_create_augroup("project-run", { clear = true }),
+		callback = check_project,
+	})
+	check_project()
 end
 
 return M
