@@ -7,6 +7,7 @@ local M = {}
 -- Java
 -- Lua
 -- JS
+-- C
 
 ---@class project-run.Cmds
 ---@field debug string Command for debug builds
@@ -15,7 +16,8 @@ local M = {}
 ---@class project-run.Preset
 ---@field paths? string[] Paths to activate this preset on (projects only)
 ---@field build? project-run.Cmds | string
----@field run_target? project-run.Cmds | string Path to target file
+---@field target? project-run.Cmds | string Path to target file
+---@field run_cmd? project-run.Cmds | string Command to use instead of run target. Best for interpreted langs
 ---@field dap_handler? string DAP Handler to use
 ---@field test? string Command to run for tests
 ---@field efm? string Custom errorformat to apply to qf
@@ -39,30 +41,23 @@ local config = {
 					debug = "odin build . -o:none -out:out/debug/main -debug",
 					release = "odin build . -o:speed -out:out/release/main",
 				},
-				run_target = { debug = "out/debug/main", release = "out/release/main" },
+				target = { debug = "out/debug/main", release = "out/release/main" },
 				test = "odin test test", -- tests need to be in cwd/test
 				dap_handler = "codelldb",
 				efm = "%f(%l:%c) %t%*[^:]: %m",
 			},
 			cpp = {
 				build = "g++ {%} -o main -Wall",
-				run_target = "./main",
+				target = "./main",
 				dap_handler = "codelldb",
 			},
-			c = {
-				base_ft = "cpp",
-			},
 			python = {
-				run_target = "{%}",
+				target = "{%}",
+				run_cmd = "python {%}",
 				dap_handler = "python",
 			},
 		},
-		projects = {
-			test = {
-				paths = { "~/Documents/programming/odin/testmake/testproject" },
-				base_ft = "odin",
-			},
-		},
+		projects = {},
 	},
 	settings = {
 		notify_build_time = true,
@@ -200,55 +195,35 @@ function M.build(mode, callback)
 	})
 end
 
+local function run_terman(cmd, name)
+	local job_name = "Project-Run-" .. name
+
+	local terman_preset = {
+		name = job_name,
+		cmd = cmd,
+		persist = true,
+	}
+
+	require("terman").open(terman_preset)
+end
+
 ---@param action "launch" | "test" | "launch_DAP"
 ---@param mode "debug" | "release"
 ---@param build boolean
 local function post_build_action(action, mode, build)
-	mode = mode or "debug"
+	local preset = get_current_preset()
+	if not preset then
+		vim.notify("No preset found", "error", { title = "Project-run" })
+		return false
+	end
 
-	local function run_action_terman()
-		-- diagnostic can be ignored as we check for this, but could be fixed later
-		local cmd
-		if action == "test" then
-			local preset = get_current_preset()
-			if not preset then
-				vim.notify("No preset found", "error", { title = "Project-run" })
-				return false
-			end
-			cmd = preset.test
-		else
-			cmd = get_mode_command(mode, "run_target")
-		end
-
-		if not cmd then
-			vim.notify("No " .. action .. " command configured", "error", { title = "Project-run" })
-			return false
-		end
-
-		local job_name = "Project-Run-" .. action
-
-		local terman_preset = {
-			name = job_name,
-			cmd = cmd,
-			persist = true,
-		}
-
-		require("terman").open(terman_preset)
+	-- handle non-compiled langs
+	if preset.build == nil then
+		build = false
 	end
 
 	local function launch_DAP()
 		local dap = require("dap")
-		local ft = vim.bo.ft
-
-		if not ft then
-			return
-		end
-
-		local preset = get_current_preset()
-		if not preset then
-			vim.notify("No preset found for buffer", "error", { title = "Project-run" })
-			return
-		end
 
 		if not preset.dap_handler then
 			vim.notify("No DAP handler configured for this preset", "error", { title = "Project-run" })
@@ -256,10 +231,10 @@ local function post_build_action(action, mode, build)
 		end
 
 		local program
-		if type(preset.run_target) == "string" then
-			program = preset.run_target
-		elseif preset.run_target.debug then
-			program = preset.run_target.debug
+		if type(preset.target) == "string" then
+			program = preset.target
+		elseif preset.target.debug then
+			program = preset.target.debug
 		else
 			vim.notify("No run target found", "error", { title = "Project-run" })
 			return
@@ -281,7 +256,19 @@ local function post_build_action(action, mode, build)
 	local function run_if_success(code)
 		if code == 0 then
 			if action == "launch" or action == "test" then
-				run_action_terman()
+				local cmd
+				if action == "test" then
+					cmd = preset.test
+				else
+					cmd = get_mode_command(mode, "target")
+				end
+
+				if not cmd then
+					vim.notify("No " .. action .. " command configured", "error", { title = "Project-run" })
+					return false
+				end
+
+				run_terman(cmd, action)
 			else
 				-- action == "launch_DAP"
 				launch_DAP()
@@ -297,9 +284,23 @@ local function post_build_action(action, mode, build)
 end
 
 -- run current ft
----@param mode "release" | "debug"
+---@param mode? "release" | "debug"
 ---@param build? boolean Whether to build first when applicable
 function M.launch(mode, build)
+	mode = mode or "debug"
+
+	local preset = get_current_preset()
+	if not preset then
+		vim.notify("No preset found", "error", { title = "Project-run" })
+		return false
+	end
+
+	if preset.run_cmd then
+		local cmd = get_mode_command(mode, "run_cmd")
+		run_terman(cmd, "launch")
+		return false
+	end
+
 	if build == false then
 		post_build_action("launch", mode, false)
 	else
@@ -309,7 +310,6 @@ end
 
 ---@param build? boolean Whether to build first when applicable
 function M.launch_DAP(build)
-	-- dont build unless its configured with a build command
 	if build == false then
 		post_build_action("launch_DAP", "debug", false)
 	else
@@ -376,7 +376,7 @@ local function load_local_config()
 
 	config.presets.projects = vim.tbl_deep_extend("force", config.presets.projects, extracted)
 	state.loaded_local_configs[cwd] = true
-	vim.notify("Loaded project config from .test.lua", "info", { title = "Project-run" })
+	vim.notify("Loaded local project config", "info", { title = "Project-run" })
 end
 
 ---@param opts? project-run.UserConfig
