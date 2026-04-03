@@ -71,6 +71,7 @@ local config = {
 
 local state = {
 	current_project = nil,
+	loaded_local_configs = {},
 }
 
 -- check if we are in a project dir and update state
@@ -174,25 +175,27 @@ function M.build(mode, callback)
 			handle_output(data)
 		end,
 		on_exit = function(_, code, _)
-			local qf = vim.fn.getqflist()
-			if #qf > 0 then -- qf is populated
-				vim.cmd("botright copen")
-			else -- qf empty
-				vim.cmd("cclose")
-			end
-
-			if code == 0 then
-				if config.settings.notify_build_time then
-					local message = string.format("Build completed in %.2fms", (vim.uv.hrtime() - start_time) / 1e6)
-					vim.notify(message, "info", { title = "Project-run" })
+			vim.schedule(function()
+				local qf = vim.fn.getqflist()
+				if #qf > 0 then -- qf is populated
+					vim.cmd("botright copen")
+				else -- qf empty
+					vim.cmd("cclose")
 				end
-			else
-				vim.notify("Build failed with code " .. code, "error", { title = "Project-run" })
-			end
 
-			if callback then
-				callback(code)
-			end
+				if code == 0 then
+					if config.settings.notify_build_time then
+						local message = string.format("Build completed in %.2fms", (vim.uv.hrtime() - start_time) / 1e6)
+						vim.notify(message, "info", { title = "Project-run" })
+					end
+				else
+					vim.notify("Build failed with code " .. code, "error", { title = "Project-run" })
+				end
+
+				if callback then
+					callback(code)
+				end
+			end)
 		end,
 	})
 end
@@ -207,7 +210,12 @@ local function post_build_action(action, mode, build)
 		-- diagnostic can be ignored as we check for this, but could be fixed later
 		local cmd
 		if action == "test" then
-			cmd = get_current_preset().test
+			local preset = get_current_preset()
+			if not preset then
+				vim.notify("No preset found", "error", { title = "Project-run" })
+				return false
+			end
+			cmd = preset.test
 		else
 			cmd = get_mode_command(mode, "run_target")
 		end
@@ -318,29 +326,85 @@ function M.test(build)
 	end
 end
 
----@param user_config? project-run.UserConfig
-function M.setup(user_config)
-	user_config = user_config or {}
-	config = vim.tbl_deep_extend("force", config, user_config)
+local function resolve_base_filetype(presets)
+	for key, preset in pairs(presets) do
+		local base = config.presets.filetypes[preset.base_ft]
+		if preset.base_ft and base then
+			presets[key] = vim.tbl_deep_extend("force", base, preset)
+		end
+	end
+end
 
-	local function resolve_base_presets(presets)
-		for key, preset in pairs(presets) do
-			local base = config.presets.filetypes[preset.base_ft]
-			if preset.base_ft and base then
-				presets[key] = vim.tbl_deep_extend("force", base, preset)
-			end
+local function load_local_config()
+	local cwd = vim.fn.getcwd()
+
+	if state.loaded_local_configs[cwd] then
+		return
+	end
+
+	local data = vim.secure.read(".project-run.lua")
+
+	if data == nil then
+		state.loaded_local_configs[cwd] = false
+		return
+	end
+
+	local fn = load(data)
+	if not fn then
+		vim.notify("Failed to load local config", "error", { title = "Project-run" })
+		return
+	end
+
+	---@type table<string, project-run.Preset>
+	local extracted = fn()
+
+	if not extracted then
+		vim.notify("Failed to execute local config", "error", { title = "Project-run" })
+		return
+	end
+
+	for _, project_config in pairs(extracted) do
+		if not project_config.paths then
+			project_config.paths = {}
+		end
+		if not vim.tbl_contains(project_config.paths, cwd) then
+			table.insert(project_config.paths, cwd)
 		end
 	end
 
-	resolve_base_presets(config.presets.filetypes)
-	resolve_base_presets(config.presets.projects)
+	resolve_base_filetype(extracted)
+
+	config.presets.projects = vim.tbl_deep_extend("force", config.presets.projects, extracted)
+	state.loaded_local_configs[cwd] = true
+	vim.notify("Loaded project config from .test.lua", "info", { title = "Project-run" })
+end
+
+---@param opts? project-run.UserConfig
+function M.setup(opts)
+	opts = opts or {}
+	config = vim.tbl_deep_extend("force", config, opts)
+
+	resolve_base_filetype(config.presets.filetypes)
+	resolve_base_filetype(config.presets.projects)
 
 	vim.api.nvim_create_autocmd({ "VimEnter", "DirChanged" }, {
 		desc = "Check for project",
 		group = vim.api.nvim_create_augroup("project-run", { clear = true }),
-		callback = check_project,
+		callback = function()
+			check_project()
+			load_local_config()
+		end,
 	})
 	check_project()
+	load_local_config()
+end
+
+function M.list_current_preset()
+	if state.current_project then
+		vim.print(state.current_project)
+	else
+		vim.print(config.presets.filetypes[vim.bo.ft])
+	end
 end
 
 return M
