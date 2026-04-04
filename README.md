@@ -1,5 +1,6 @@
 # Project-Run.nvim
 Plugin for managing project and filetype specific commands for running, building, debugging and testing.
+This is something I made for my personal usecase, YMMV.
 
 ## Features
 - Manage common tasks on a per-project or filetype level
@@ -8,7 +9,7 @@ Plugin for managing project and filetype specific commands for running, building
 - Debugging support via DAP
 - Project configuration can be loaded dynamically from a file (user is prompted to trust file via `vim.secure.read()`)
 - Project and filetype presets can inherit
-- Single file, 300 line plugin
+- Single file, ~400 line plugin
 
 ## API
 
@@ -28,24 +29,33 @@ Plugin for managing project and filetype specific commands for running, building
 ## Configuration
 
 ### Presets
+
 Commands can be a string or a table like so:
 ```lua
 { debug = string, release = string }
 ```
+Commands also allow for substitution of text within `{}` using `vim.fn.expand()`.
+This means that `python {%:p}` will expand to `python /absolute/path/to/file`
+
 Preset config:
 ```lua
 {
-  paths? = string[],          -- Project paths (projects only)
-  build? = Cmds | string,     -- Build command(s)
-  run_target? = Cmds | string,-- Executable path
-  dap_handler? = string,     -- DAP adapter (e.g., "codelldb", "python")
-  test? = string,             -- Test command
-  efm? = string,              -- Errorformat for quickfix
-  base_ft? = string,          -- Inherit from another filetype
+  paths? = string[],              -- Project paths (projects only)
+  build? = Cmds | string,         -- Build command(s)
+  target? = Cmds | string,        -- Path to executable/target file (required for DAP)
+  run_cmd? = Cmds | string,       -- Command to run instead of target (for interpreted languages)
+  dap_handler? = string,          -- DAP adapter (e.g., "codelldb", "python")
+  test? = string,                 -- Test command
+  efm? = string,                  -- Errorformat for quickfix
+  base_ft? = string,              -- Inherit from another filetype
 }
 ```
 
-The preset table is structured as follows:
+`run_cmd` will take priority over `target`, but will not be able to use the qf list for error output.
+`run_cmd` is best used with interpreted languages, for example `run_cmd = "python {%}"`, but it should work with commands like `cargo run`.
+
+
+These are placed in the presets table of the config. This is structured as follows:
 ```lua
 presets = {
   filetypes = {
@@ -55,6 +65,19 @@ presets = {
   -- project presets here
   }
 },
+```
+
+### Loading Presets From a File
+Presets can be loaded from a file named `.project-run.lua` in the project root folder.
+This file must return a list of project presets, for example:
+```lua
+-- .project-run.lua
+return {
+	example_project = {
+		paths = { "~/Documents/programming/example_project" },
+		base_ft = "c",
+	},
+}
 ```
 
 ### Default config
@@ -67,29 +90,23 @@ local config = {
 					debug = "odin build . -o:none -out:out/debug/main -debug",
 					release = "odin build . -o:speed -out:out/release/main",
 				},
-				run_target = { debug = "out/debug/main", release = "out/release/main" },
+				target = { debug = "out/debug/main", release = "out/release/main" },
 				test = "odin test test", -- tests need to be in cwd/test
 				dap_handler = "codelldb",
 				efm = "%f(%l:%c) %t%*[^:]: %m",
 			},
 			cpp = {
 				build = "g++ {%} -o main -Wall",
-				run_target = "./main",
+				target = "./main",
 				dap_handler = "codelldb",
 			},
-			c = {
-				base_ft = "cpp",
-			},
 			python = {
-				run_target = "{%}",
+				target = "{%}",
+				run_cmd = "python {%}",
 				dap_handler = "python",
 			},
 		},
 		projects = {
-			test = {
-				paths = { "~/Documents/programming/odin/testmake/testproject" },
-				base_ft = "odin",
-			},
 		},
 	},
 	settings = {
@@ -104,6 +121,7 @@ Lazy.nvim
 ```lua
 {
   'Panama0/project-run.nvim'
+  -- These are hardcoded right now, sorry!
   dependencies = { 'Panama0/Terman.nvim', 'mfussenegger/nvim-dap' },
   opts = {}
 }
