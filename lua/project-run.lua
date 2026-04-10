@@ -391,12 +391,12 @@ function M.setup(opts)
 		desc = "Check for project",
 		group = vim.api.nvim_create_augroup("project-run", { clear = true }),
 		callback = function()
-			check_project()
 			load_local_config()
+			check_project()
 		end,
 	})
-	check_project()
 	load_local_config()
+	check_project()
 end
 
 function M.list_current_preset()
@@ -405,6 +405,10 @@ function M.list_current_preset()
 	else
 		vim.print(config.presets.filetypes[vim.bo.ft])
 	end
+end
+
+function M.list_presets()
+	vim.print(config.presets)
 end
 
 return M
